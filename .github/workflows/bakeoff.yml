@@ -94,10 +94,12 @@ jobs:
         if: always()
         run: |
           mkdir -p reports
-          # KICS emits gl-sast-report.json by default for the glsast format.
-          # Different versions have shipped slightly different naming, so
-          # accept the common variants defensively.
+          # KICS prefixes the glsast output with `gl-sast-` and appends the
+          # --output-name value, so the file is `gl-sast-kics-<cloud>.json`.
+          # Earlier/later versions have shipped slightly different naming;
+          # accept the known variants defensively.
           for candidate in \
+              "kics-out/gl-sast-kics-${{ matrix.cloud }}.json" \
               "kics-out/gl-sast-report.json" \
               "kics-out/kics-${{ matrix.cloud }}.glsast.json" \
               "kics-out/kics-${{ matrix.cloud }}.gl-sast.json"; do
