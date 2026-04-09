@@ -35,7 +35,7 @@ This repo gives the Director of CICD four answers:
 ## Repo layout
 
 ```
-.github/workflows/        Five per-tool workflows + one aggregator
+.github/workflows/        bakeoff.yml — 5 parallel scanner jobs + aggregator
 terraform/aws/            Realistic AWS stack with 20 planted issues
 terraform/azure/          Realistic Azure stack with 21 planted issues
 tools/normalize/          SARIF → GitLab SAST converter (stdlib only)
@@ -51,10 +51,10 @@ that table to compute per-tool recall.
 
 ### In CI (GitHub Actions)
 
-Push a branch and the five `scan-*.yml` workflows run in parallel against
-both clouds. After they complete, `aggregate-reports.yml` triggers
-automatically (via `workflow_run`) and produces the `bake-off-results`
-artifact containing:
+Push a branch and `bakeoff.yml` runs all five scanners as parallel matrix
+jobs (one job per scanner × cloud). After every scanner finishes, the
+`aggregate` job (declared via `needs:`) merges all artifacts and produces
+the `bake-off-results` bundle containing:
 
 - `comparison.json` — structured per-tool comparison dataset
 - `comparison.html` — self-contained dashboard (open in browser, no server)

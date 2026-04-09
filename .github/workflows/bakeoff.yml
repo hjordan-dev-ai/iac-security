@@ -1,0 +1,410 @@
+name: bakeoff
+
+# Single workflow that runs all five scanners as parallel matrix jobs and
+# aggregates the results in one final job. Collapsing into one workflow lets
+# the aggregator use a same-run actions/download-artifact (no fragile
+# cross-workflow plumbing).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────
+  # Checkov
+  # ───────────────────────────────────────────────────────────────────────
+  checkov:
+    name: Checkov / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true
+        with:
+          directory: terraform/${{ matrix.cloud }}
+          framework: terraform
+          output_format: gitlab_sast,json
+          output_file_path: ./checkov-out
+          quiet: true
+          soft_fail: true
+          var_file: terraform/${{ matrix.cloud }}/terraform.tfvars
+
+      - name: Stage GitLab SAST artifact
+        if: always()
+        run: |
+          mkdir -p reports
+          cp checkov-out/results_gitlab_sast.json \
+             reports/gl-sast-report-checkov-${{ matrix.cloud }}.json
+          cp checkov-out/results_json.json \
+             reports/raw-checkov-${{ matrix.cloud }}.json
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gl-sast-checkov-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────
+  # KICS — run via official container. ⚠️ The Checkmarx KICS GitHub Action
+  # was reported compromised in March 2026; until that incident is verified
+  # against upstream advisories we run the binary inside the container
+  # instead of using the marketplace action. See SECURITY.md.
+  # ───────────────────────────────────────────────────────────────────────
+  kics:
+    name: KICS / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run KICS (containerized)
+        continue-on-error: true
+        run: |
+          mkdir -p kics-out reports
+          docker run --rm \
+            -v "$PWD":/path \
+            checkmarx/kics:latest \
+            scan \
+              --type Terraform \
+              --path /path/terraform/${{ matrix.cloud }} \
+              --report-formats gitlab-sast,json \
+              --output-path /path/kics-out \
+              --output-name kics-${{ matrix.cloud }} \
+              --no-progress || true
+          ls -la kics-out/ || true
+
+      - name: Stage GitLab SAST artifact
+        if: always()
+        run: |
+          mkdir -p reports
+          # KICS emits files like kics-<cloud>.gl-sast.json and kics-<cloud>.json.
+          # Be defensive — different versions name them differently.
+          for candidate in \
+              "kics-out/gl-sast-report.json" \
+              "kics-out/kics-${{ matrix.cloud }}.gl-sast-report.json" \
+              "kics-out/kics-${{ matrix.cloud }}.gl-sast.json"; do
+            if [ -f "$candidate" ]; then
+              cp "$candidate" "reports/gl-sast-report-kics-${{ matrix.cloud }}.json"
+              break
+            fi
+          done
+          for candidate in \
+              "kics-out/results.json" \
+              "kics-out/kics-${{ matrix.cloud }}.json"; do
+            if [ -f "$candidate" ]; then
+              cp "$candidate" "reports/raw-kics-${{ matrix.cloud }}.json"
+              break
+            fi
+          done
+          # Always emit a stub so the aggregator can include the row.
+          if [ ! -f "reports/gl-sast-report-kics-${{ matrix.cloud }}.json" ]; then
+            echo "WARN: KICS produced no GitLab SAST output; emitting empty stub"
+            python3 - <<'PY'
+          import json, datetime, os
+          cloud = os.environ["CLOUD"]
+          stub = {
+            "version": "15.0.7",
+            "scan": {
+              "scanner": {"id": "kics", "name": "KICS", "version": "unknown",
+                          "vendor": {"name": "Checkmarx"}},
+              "analyzer": {"id": "kics", "name": "KICS", "version": "unknown",
+                           "vendor": {"name": "Checkmarx"}},
+              "type": "sast", "status": "failure",
+              "start_time": "1970-01-01T00:00:00", "end_time": "1970-01-01T00:00:00",
+            },
+            "vulnerabilities": [],
+          }
+          with open(f"reports/gl-sast-report-kics-{cloud}.json", "w") as f:
+              json.dump(stub, f)
+          PY
+          fi
+        env:
+          CLOUD: ${{ matrix.cloud }}
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gl-sast-kics-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Trivy — installed from the official release tarball. ⚠️ March 2026
+  # supply-chain incident on aquasecurity/trivy-action; we install the
+  # binary directly. Pinned to v0.69.3.
+  # ───────────────────────────────────────────────────────────────────────
+  trivy:
+    name: Trivy / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Trivy v0.69.3
+        run: |
+          curl -sSL "https://github.com/aquasecurity/trivy/releases/download/v0.69.3/trivy_0.69.3_Linux-64bit.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin trivy
+          trivy --version
+
+      - name: Scan Terraform with Trivy
+        continue-on-error: true
+        run: |
+          mkdir -p reports trivy-out
+          trivy config \
+            --format sarif \
+            --output trivy-out/trivy.sarif \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            --exit-code 0 \
+            terraform/${{ matrix.cloud }}
+          trivy config \
+            --format json \
+            --output trivy-out/trivy.json \
+            --exit-code 0 \
+            terraform/${{ matrix.cloud }} || true
+          cp trivy-out/trivy.json reports/raw-trivy-${{ matrix.cloud }}.json
+
+      - name: Convert SARIF → GitLab SAST
+        if: always()
+        run: |
+          python tools/normalize/sarif_to_gitlab_sast.py \
+            trivy-out/trivy.sarif \
+            reports/gl-sast-report-trivy-${{ matrix.cloud }}.json \
+            --scanner-id trivy \
+            --scanner-name Trivy \
+            --vendor "Aqua Security"
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gl-sast-trivy-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Snyk IaC — gracefully skips when SNYK_TOKEN is unset.
+  # ───────────────────────────────────────────────────────────────────────
+  snyk:
+    name: Snyk IaC / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Skip if no SNYK_TOKEN
+        id: gate
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "SNYK_TOKEN is unset — skipping Snyk scan."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Snyk CLI
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          sudo curl -sSLo /usr/local/bin/snyk https://static.snyk.io/cli/latest/snyk-linux
+          sudo chmod +x /usr/local/bin/snyk
+          snyk --version
+
+      - name: Run Snyk IaC
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+        run: |
+          mkdir -p reports snyk-out
+          snyk iac test terraform/${{ matrix.cloud }} \
+            --sarif-file-output=snyk-out/snyk.sarif \
+            --json-file-output=snyk-out/snyk.json || true
+          cp snyk-out/snyk.json reports/raw-snyk-${{ matrix.cloud }}.json
+
+      - name: Convert SARIF → GitLab SAST
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          python tools/normalize/sarif_to_gitlab_sast.py \
+            snyk-out/snyk.sarif \
+            reports/gl-sast-report-snyk-${{ matrix.cloud }}.json \
+            --scanner-id snyk \
+            --scanner-name "Snyk IaC" \
+            --vendor Snyk
+
+      - name: Emit empty report when skipped
+        if: steps.gate.outputs.skip == 'true'
+        run: |
+          mkdir -p reports
+          cat > reports/gl-sast-report-snyk-${{ matrix.cloud }}.json <<'EOF'
+          {
+            "version": "15.0.7",
+            "scan": {
+              "scanner": {"id": "snyk", "name": "Snyk IaC", "version": "skipped", "vendor": {"name": "Snyk"}},
+              "analyzer": {"id": "snyk", "name": "Snyk IaC", "version": "skipped", "vendor": {"name": "Snyk"}},
+              "type": "sast", "status": "failure",
+              "start_time": "1970-01-01T00:00:00", "end_time": "1970-01-01T00:00:00"
+            },
+            "vulnerabilities": []
+          }
+          EOF
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gl-sast-snyk-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Semgrep IaC — runs the curated p/terraform ruleset. Coverage is
+  # narrower than dedicated IaC scanners by design; the bake-off measures
+  # exactly that gap.
+  # ───────────────────────────────────────────────────────────────────────
+  semgrep:
+    name: Semgrep / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.96.0
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run Semgrep (terraform ruleset)
+        continue-on-error: true
+        run: |
+          mkdir -p reports semgrep-out
+          semgrep scan \
+            --config p/terraform \
+            --gitlab-sast \
+            --output semgrep-out/gl-sast.json \
+            --metrics=off \
+            terraform/${{ matrix.cloud }} || true
+          semgrep scan \
+            --config p/terraform \
+            --json \
+            --output semgrep-out/semgrep.json \
+            --metrics=off \
+            terraform/${{ matrix.cloud }} || true
+          cp semgrep-out/gl-sast.json reports/gl-sast-report-semgrep-${{ matrix.cloud }}.json
+          cp semgrep-out/semgrep.json reports/raw-semgrep-${{ matrix.cloud }}.json
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gl-sast-semgrep-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Aggregate — runs after every scanner completes. Uses needs: to wait
+  # for all matrix jobs of all five scanners.
+  # ───────────────────────────────────────────────────────────────────────
+  aggregate:
+    name: Aggregate bake-off results
+    runs-on: ubuntu-latest
+    needs: [checkov, kics, trivy, snyk, semgrep]
+    if: always()
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tools/requirements.txt
+
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: downloaded-artifacts
+          pattern: gl-sast-*
+          merge-multiple: false
+
+      - name: Flatten reports
+        run: |
+          mkdir -p reports
+          find downloaded-artifacts -type f \( -name 'gl-sast-report-*.json' -o -name 'raw-*.json' \) \
+            -exec cp {} reports/ \;
+          ls -la reports/
+
+      - name: Aggregate
+        run: |
+          mkdir -p out
+          python tools/aggregate/aggregate.py --input reports --output out
+
+      - name: Render HTML dashboard
+        run: |
+          python tools/aggregate/render_html.py \
+            --input out/comparison.json \
+            --output out/comparison.html
+
+      - name: Compute precision/recall vs. ground truth
+        run: |
+          python tools/ground_truth/compare.py \
+            --reports reports \
+            --ground-truth-aws terraform/aws/EXPECTED_FINDINGS.md \
+            --ground-truth-azure terraform/azure/EXPECTED_FINDINGS.md \
+            --output out/precision_recall.json
+
+      - name: Post step summary
+        if: always()
+        run: |
+          {
+            cat out/summary.md
+            echo
+            echo "## Recall vs. ground truth"
+            echo
+            python -c "
+          import json
+          d = json.load(open('out/precision_recall.json'))
+          print('| Tool | Caught | Planted | Recall |')
+          print('|---|---|---|---|')
+          for tool in d['tools']:
+              t = d['per_tool'][tool]
+              print(f\"| **{tool}** | {t['caught']} | {t['planted']} | {t['recall']:.0%} |\")
+          "
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: bake-off-results
+          path: |
+            out/comparison.json
+            out/comparison.html
+            out/summary.md
+            out/precision_recall.json
+            reports/
+          retention-days: 30
