@@ -1,0 +1,56 @@
+name: scan-semgrep
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    container:
+      # semgrep/semgrep:latest — pin to a verified digest before prod use.
+      image: semgrep/semgrep:1.96.0
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+
+    steps:
+      - name: Checkout
+        # actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Run Semgrep (terraform ruleset)
+        continue-on-error: true
+        run: |
+          mkdir -p reports semgrep-out
+          semgrep scan \
+            --config p/terraform \
+            --gitlab-sast \
+            --output semgrep-out/gl-sast.json \
+            --metrics=off \
+            --error \
+            terraform/${{ matrix.cloud }} || true
+          semgrep scan \
+            --config p/terraform \
+            --json \
+            --output semgrep-out/semgrep.json \
+            --metrics=off \
+            terraform/${{ matrix.cloud }} || true
+          cp semgrep-out/gl-sast.json reports/gl-sast-report-semgrep-${{ matrix.cloud }}.json
+          cp semgrep-out/semgrep.json reports/raw-semgrep-${{ matrix.cloud }}.json
+
+      - name: Upload report
+        if: always()
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: gl-sast-semgrep-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14

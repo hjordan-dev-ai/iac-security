@@ -1,0 +1,113 @@
+name: aggregate-reports
+
+on:
+  workflow_run:
+    workflows:
+      - scan-checkov
+      - scan-kics
+      - scan-trivy
+      - scan-snyk
+      - scan-semgrep
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  aggregate:
+    name: Aggregate bake-off results
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        # actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Setup Python
+        # actions/setup-python@v5
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tools/requirements.txt
+
+      # Pull every gl-sast-* artifact from the most recent run of every scan
+      # workflow on the current ref. dawidd6/action-download-artifact resolves
+      # cross-workflow artifact downloads (which actions/download-artifact
+      # does not support out of the box for workflow_run triggers).
+      - name: Download all scan artifacts
+        # dawidd6/action-download-artifact@v6 — replace with verified SHA before prod use.
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          path: downloaded-artifacts
+          workflow_search: true
+          workflow_conclusion: ""
+          name: gl-sast-
+          name_is_regexp: true
+          if_no_artifact_found: warn
+
+      - name: Flatten reports into ./reports
+        run: |
+          mkdir -p reports
+          # Each artifact unpacks into its own subdirectory; collect every
+          # gl-sast-report-*.json and raw-*.json file into one flat layout.
+          find downloaded-artifacts -type f \( -name 'gl-sast-report-*.json' -o -name 'raw-*.json' \) \
+            -exec cp {} reports/ \;
+          ls -la reports/
+
+      - name: Aggregate
+        run: |
+          mkdir -p out
+          python tools/aggregate/aggregate.py --input reports --output out
+
+      - name: Render HTML dashboard
+        run: |
+          python tools/aggregate/render_html.py \
+            --input out/comparison.json \
+            --output out/comparison.html
+
+      - name: Compute precision/recall vs. ground truth
+        run: |
+          python tools/ground_truth/compare.py \
+            --reports reports \
+            --ground-truth-aws terraform/aws/EXPECTED_FINDINGS.md \
+            --ground-truth-azure terraform/azure/EXPECTED_FINDINGS.md \
+            --output out/precision_recall.json
+
+      - name: Post step summary
+        if: always()
+        run: |
+          {
+            cat out/summary.md
+            echo
+            echo "## Recall vs. ground truth"
+            echo
+            python -c "
+          import json
+          d = json.load(open('out/precision_recall.json'))
+          print('| Tool | Caught | Planted | Recall |')
+          print('|---|---|---|---|')
+          for tool in d['tools']:
+              t = d['per_tool'][tool]
+              print(f\"| **{tool}** | {t['caught']} | {t['planted']} | {t['recall']:.0%} |\")
+          "
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bake-off bundle
+        if: always()
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: bake-off-results
+          path: |
+            out/comparison.json
+            out/comparison.html
+            out/summary.md
+            out/precision_recall.json
+            reports/
+          retention-days: 30

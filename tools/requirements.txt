@@ -1,0 +1,7 @@
+# The normalize/aggregate/ground-truth tools are deliberately stdlib-only.
+# This file exists so the GitHub Actions workflow has something to install
+# (and so future work — e.g. JSON-schema validation, Jinja templates — has
+# a single place to land deps without touching CI).
+
+# Optional: validate normalized output against the GitLab SAST schema.
+jsonschema>=4.21.0

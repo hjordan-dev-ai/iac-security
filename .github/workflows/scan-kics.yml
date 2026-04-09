@@ -1,0 +1,67 @@
+name: scan-kics
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kics:
+    name: KICS / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+
+    steps:
+      - name: Checkout
+        # actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      # ⚠️ The Checkmarx KICS GitHub Action was reported compromised in
+      # March 2026. Until that incident is fully remediated upstream we run
+      # KICS via the official container image instead of the marketplace
+      # action. The image digest is pinned in SECURITY.md.
+      - name: Run KICS (containerized, pinned digest)
+        continue-on-error: true
+        run: |
+          mkdir -p reports kics-out
+          docker run --rm \
+            -v "$PWD":/path \
+            checkmarx/kics:v2.1.4@sha256:REPLACE_ME_WITH_VERIFIED_DIGEST \
+            scan \
+              --type Terraform \
+              --path /path/terraform/${{ matrix.cloud }} \
+              --report-formats gitlab-sast,json \
+              --output-path /path/kics-out \
+              --output-name kics-${{ matrix.cloud }} \
+              --no-progress || true
+
+      - name: Stage GitLab SAST artifact
+        if: always()
+        run: |
+          # KICS emits gl-sast-report.json under output-path. Some versions
+          # produce a per-format suffix; we accept either layout.
+          if [ -f kics-out/gl-sast-report.json ]; then
+            cp kics-out/gl-sast-report.json reports/gl-sast-report-kics-${{ matrix.cloud }}.json
+          elif [ -f kics-out/kics-${{ matrix.cloud }}.gl-sast.json ]; then
+            cp kics-out/kics-${{ matrix.cloud }}.gl-sast.json reports/gl-sast-report-kics-${{ matrix.cloud }}.json
+          fi
+          if [ -f kics-out/kics-${{ matrix.cloud }}.json ]; then
+            cp kics-out/kics-${{ matrix.cloud }}.json reports/raw-kics-${{ matrix.cloud }}.json
+          fi
+          mkdir -p reports
+
+      - name: Upload report
+        if: always()
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: gl-sast-kics-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14

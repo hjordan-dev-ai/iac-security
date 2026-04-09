@@ -1,0 +1,57 @@
+name: scan-checkov
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkov:
+    name: Checkov / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+
+    steps:
+      - name: Checkout
+        # actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      - name: Run Checkov
+        id: checkov
+        # bridgecrewio/checkov-action@v12 — replace with verified SHA before prod use.
+        uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true
+        with:
+          directory: terraform/${{ matrix.cloud }}
+          framework: terraform
+          # Dual output: GitLab SAST + native JSON for debugging.
+          output_format: gitlab_sast,json
+          output_file_path: ./checkov-out
+          quiet: true
+          soft_fail: true
+          var_file: terraform/${{ matrix.cloud }}/terraform.tfvars
+
+      - name: Stage GitLab SAST artifact
+        if: always()
+        run: |
+          mkdir -p reports
+          cp checkov-out/results_gitlab_sast.json \
+             reports/gl-sast-report-checkov-${{ matrix.cloud }}.json
+          cp checkov-out/results_json.json \
+             reports/raw-checkov-${{ matrix.cloud }}.json
+
+      - name: Upload report
+        if: always()
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: gl-sast-checkov-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
