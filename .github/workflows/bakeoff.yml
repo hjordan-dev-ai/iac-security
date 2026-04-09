@@ -76,15 +76,17 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p kics-out reports
+          # KICS calls the GitLab SAST format `glsast` (not `gitlab-sast`).
           docker run --rm \
             -v "$PWD":/path \
             checkmarx/kics:latest \
             scan \
               --type Terraform \
               --path /path/terraform/${{ matrix.cloud }} \
-              --report-formats gitlab-sast,json \
+              --report-formats glsast,json \
               --output-path /path/kics-out \
               --output-name kics-${{ matrix.cloud }} \
+              --ignore-on-exit results \
               --no-progress || true
           ls -la kics-out/ || true
 
@@ -92,11 +94,12 @@ jobs:
         if: always()
         run: |
           mkdir -p reports
-          # KICS emits files like kics-<cloud>.gl-sast.json and kics-<cloud>.json.
-          # Be defensive — different versions name them differently.
+          # KICS emits gl-sast-report.json by default for the glsast format.
+          # Different versions have shipped slightly different naming, so
+          # accept the common variants defensively.
           for candidate in \
               "kics-out/gl-sast-report.json" \
-              "kics-out/kics-${{ matrix.cloud }}.gl-sast-report.json" \
+              "kics-out/kics-${{ matrix.cloud }}.glsast.json" \
               "kics-out/kics-${{ matrix.cloud }}.gl-sast.json"; do
             if [ -f "$candidate" ]; then
               cp "$candidate" "reports/gl-sast-report-kics-${{ matrix.cloud }}.json"
@@ -104,8 +107,8 @@ jobs:
             fi
           done
           for candidate in \
-              "kics-out/results.json" \
-              "kics-out/kics-${{ matrix.cloud }}.json"; do
+              "kics-out/kics-${{ matrix.cloud }}.json" \
+              "kics-out/results.json"; do
             if [ -f "$candidate" ]; then
               cp "$candidate" "reports/raw-kics-${{ matrix.cloud }}.json"
               break
@@ -374,8 +377,8 @@ jobs:
         run: |
           python tools/ground_truth/compare.py \
             --reports reports \
-            --ground-truth-aws terraform/aws/EXPECTED_FINDINGS.md \
-            --ground-truth-azure terraform/azure/EXPECTED_FINDINGS.md \
+            --terraform-aws terraform/aws \
+            --terraform-azure terraform/azure \
             --output out/precision_recall.json
 
       - name: Post step summary

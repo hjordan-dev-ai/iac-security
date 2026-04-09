@@ -112,6 +112,23 @@ how it handles this:
 | Snyk IaC | _tbd_ | _tbd_ | Converted | Proprietary | _tbd_ |
 | Semgrep | _tbd_ | _tbd_ | Native | YAML | _tbd_ |
 
+## Known reporting quirks
+
+- **Checkov severity is always `Unknown`** in the GitLab SAST output. Open-source
+  Checkov leaves the severity field blank — severities live in the paid
+  Bridgecrew/Prisma policy catalog. This is upstream behavior, not a converter
+  bug. The dashboard still shows totals; severity buckets just collapse into
+  the Unknown column for Checkov.
+- **Recall is matched by file + resource line range**, not by rule ID. Different
+  scanners use wildly different rule-ID conventions (`CKV_AWS_24` vs `AWS-0107`
+  vs `terraform.aws.security.aws-ec2-...`). The matcher parses the actual `.tf`
+  files for resource line ranges and credits a tool if it flagged anything in
+  the right block.
+- **Tool overlap matrix uses `(file_basename, line)`** — also rule-ID-agnostic
+  for the same reason. The diagonal shows each tool's unique source-location
+  count (which is lower than total findings since most tools fire multiple
+  rules at the same resource).
+
 ## What's intentionally out of scope
 
 - Running scanners against real internal Terraform — this is a synthetic bake-off

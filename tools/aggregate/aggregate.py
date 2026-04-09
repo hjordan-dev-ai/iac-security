@@ -26,6 +26,13 @@ REPORT_RE = re.compile(r"gl-sast-report-(?P<tool>[^-]+)-(?P<cloud>[^.]+)\.json$"
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Info", "Unknown"]
 
 
+def _basename(file: str) -> str:
+    """Strip directory prefix so per-tool path differences (e.g. Trivy
+    reporting `compute.tf` vs Checkov reporting `terraform/aws/compute.tf`)
+    don't fragment the overlap matrix."""
+    return Path(file).name
+
+
 def _load_reports(input_dir: Path) -> dict[tuple[str, str], dict]:
     """Return {(tool, cloud): report_json}."""
     reports: dict[tuple[str, str], dict] = {}
@@ -41,11 +48,11 @@ def _load_reports(input_dir: Path) -> dict[tuple[str, str], dict]:
 
 
 def _finding_key(vuln: dict) -> tuple[str, int, str]:
-    """Stable cross-tool key for a finding: (file, start_line, rule_id)."""
+    """Stable cross-tool key for a finding: (file_basename, start_line, rule_id)."""
     loc = vuln.get("location", {}) or {}
     ident = (vuln.get("identifiers") or [{}])[0]
     return (
-        loc.get("file", "?"),
+        _basename(loc.get("file", "?")),
         int(loc.get("start_line", 0)),
         ident.get("value") or vuln.get("name", "?"),
     )
@@ -54,7 +61,7 @@ def _finding_key(vuln: dict) -> tuple[str, int, str]:
 def _resource_key(vuln: dict) -> tuple[str, int]:
     """Coarser key — same file:line regardless of which rule fired."""
     loc = vuln.get("location", {}) or {}
-    return (loc.get("file", "?"), int(loc.get("start_line", 0)))
+    return (_basename(loc.get("file", "?")), int(loc.get("start_line", 0)))
 
 
 def _severity_counts(vulns: list[dict]) -> dict[str, int]:
@@ -130,19 +137,23 @@ def build_comparison(reports: dict[tuple[str, str], dict]) -> dict[str, Any]:
                     }
                 )
 
-    # Overlap matrix: |A ∩ B| at finding-key granularity, summed across clouds.
+    # Overlap matrix: |A ∩ B| at the coarser (cloud, file_basename, line)
+    # grain — rule_id is excluded because each scanner has its own naming
+    # convention (CKV_AWS_24 vs AWS-0107 vs terraform.aws.security.*) and
+    # the question we care about is "did both tools flag the same source
+    # location", not "did both tools use the same rule name for it".
     overlap: dict[str, dict[str, int]] = {a: {b: 0 for b in tools} for a in tools}
-    per_tool_findings: dict[str, set[tuple[str, str, int, str]]] = defaultdict(set)
+    per_tool_locations: dict[str, set[tuple[str, str, int]]] = defaultdict(set)
     for (tool, cloud), report in reports.items():
         for v in report.get("vulnerabilities", []) or []:
-            f, l, r = _finding_key(v)
-            per_tool_findings[tool].add((cloud, f, l, r))
+            f, l = _resource_key(v)
+            per_tool_locations[tool].add((cloud, f, l))
     for a, b in combinations(tools, 2):
-        common = len(per_tool_findings[a] & per_tool_findings[b])
+        common = len(per_tool_locations[a] & per_tool_locations[b])
         overlap[a][b] = common
         overlap[b][a] = common
     for t in tools:
-        overlap[t][t] = len(per_tool_findings[t])
+        overlap[t][t] = len(per_tool_locations[t])
 
     return {
         "tools": tools,
