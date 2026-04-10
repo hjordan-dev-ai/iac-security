@@ -361,17 +361,18 @@ jobs:
             --policy-dir policies \
             --directory terraform/${{ matrix.cloud }} \
             --output json \
-            --output-file c7n-out/c7n.json \
-            --filters "resource=terraform.*" || true
-          cp c7n-out/c7n.json reports/raw-c7n-left-${{ matrix.cloud }}.json 2>/dev/null || true
+            --output-file c7n-out/c7n.json || true
+          cp c7n-out/c7n.json reports/raw-c7nleft-${{ matrix.cloud }}.json 2>/dev/null || true
 
       - name: Convert c7n-left JSON → GitLab SAST
         if: always()
         run: |
+          # Use "c7nleft" (no hyphen) in filenames so the aggregator regex
+          # correctly parses the tool name from gl-sast-report-<tool>-<cloud>.json.
           if [ -f c7n-out/c7n.json ] && [ -s c7n-out/c7n.json ]; then
             python tools/normalize/c7n_to_gitlab_sast.py \
               c7n-out/c7n.json \
-              reports/gl-sast-report-c7n-left-${{ matrix.cloud }}.json
+              reports/gl-sast-report-c7nleft-${{ matrix.cloud }}.json
           else
             echo "c7n-left produced no output; emitting empty stub"
             python3 -c "
@@ -379,16 +380,16 @@ jobs:
           stub = {
             'version': '15.0.7',
             'scan': {
-              'scanner': {'id': 'c7n-left', 'name': 'c7n-left', 'version': 'unknown',
+              'scanner': {'id': 'c7nleft', 'name': 'c7n-left', 'version': 'unknown',
                           'vendor': {'name': 'Cloud Custodian'}},
-              'analyzer': {'id': 'c7n-left', 'name': 'c7n-left', 'version': 'unknown',
+              'analyzer': {'id': 'c7nleft', 'name': 'c7n-left', 'version': 'unknown',
                            'vendor': {'name': 'Cloud Custodian'}},
               'type': 'sast', 'status': 'failure',
               'start_time': '1970-01-01T00:00:00', 'end_time': '1970-01-01T00:00:00',
             },
             'vulnerabilities': [],
           }
-          with open('reports/gl-sast-report-c7n-left-${{ matrix.cloud }}.json', 'w') as f:
+          with open('reports/gl-sast-report-c7nleft-${{ matrix.cloud }}.json', 'w') as f:
               json.dump(stub, f)
           "
           fi
@@ -396,7 +397,7 @@ jobs:
       - uses: actions/upload-artifact@v5
         if: always()
         with:
-          name: gl-sast-c7n-left-${{ matrix.cloud }}
+          name: gl-sast-c7nleft-${{ matrix.cloud }}
           path: reports/
           retention-days: 14
 
