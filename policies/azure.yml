@@ -1,0 +1,129 @@
+# c7n-left policies for the Azure planted-issue stack.
+#
+# Same constraints as the AWS set: c7n-left evaluates individual
+# resources, so cross-resource checks (e.g. "NSG has no flow log
+# resource") aren't expressible.
+
+policies:
+
+  # ── NSG ──────────────────────────────────────────────────────────
+  - name: nsg-ssh-open-to-world
+    resource: terraform.azurerm_network_security_group
+    description: SSH (port 22) open to Internet
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: "security_rule[?destination_port_range=='22'].source_address_prefix"
+        value: "*"
+        op: contains
+
+  - name: nsg-rdp-open-to-world
+    resource: terraform.azurerm_network_security_group
+    description: RDP (port 3389) open to Internet
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: "security_rule[?destination_port_range=='3389'].source_address_prefix"
+        value: "*"
+        op: contains
+
+  # ── VM ───────────────────────────────────────────────────────────
+  - name: vm-password-auth-enabled
+    resource: terraform.azurerm_linux_virtual_machine
+    description: Password authentication is enabled instead of SSH-key only
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: disable_password_authentication
+        value: false
+
+  # ── Storage ──────────────────────────────────────────────────────
+  - name: storage-http-allowed
+    resource: terraform.azurerm_storage_account
+    description: HTTPS-only traffic not enforced
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: enable_https_traffic_only
+        value: false
+
+  - name: storage-tls-version-low
+    resource: terraform.azurerm_storage_account
+    description: Minimum TLS version is below 1.2
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: min_tls_version
+        value: TLS1_2
+        op: ne
+
+  - name: storage-public-network-access
+    resource: terraform.azurerm_storage_account
+    description: Public network access is enabled
+    metadata:
+      severity: medium
+    filters:
+      - type: value
+        key: public_network_access_enabled
+        value: true
+
+  - name: storage-container-public-access
+    resource: terraform.azurerm_storage_container
+    description: Storage container allows anonymous public access
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: container_access_type
+        value: private
+        op: ne
+
+  # ── Key Vault ────────────────────────────────────────────────────
+  - name: kv-no-purge-protection
+    resource: terraform.azurerm_key_vault
+    description: Key Vault purge protection is disabled
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: purge_protection_enabled
+        value: false
+
+  - name: kv-public-network-access
+    resource: terraform.azurerm_key_vault
+    description: Key Vault public network access is enabled
+    metadata:
+      severity: medium
+    filters:
+      - type: value
+        key: public_network_access_enabled
+        value: true
+
+  # ── SQL ──────────────────────────────────────────────────────────
+  - name: sql-public-network-access
+    resource: terraform.azurerm_mssql_server
+    description: SQL Server public network access is enabled
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: public_network_access_enabled
+        value: true
+
+  - name: sql-firewall-allow-all
+    resource: terraform.azurerm_mssql_firewall_rule
+    description: SQL firewall allows the entire IPv4 address space
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: start_ip_address
+        value: "0.0.0.0"
+      - type: value
+        key: end_ip_address
+        value: "255.255.255.255"

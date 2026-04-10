@@ -1,0 +1,146 @@
+# c7n-left policies for the AWS planted-issue stack.
+#
+# These are scoped to what c7n-left CAN express. c7n-left evaluates
+# individual resources, so cross-resource checks (e.g. "S3 bucket has
+# no associated aws_s3_bucket_public_access_block") are not possible.
+# That gap is part of the bake-off signal.
+
+policies:
+
+  # ── Security groups ──────────────────────────────────────────────
+  - name: sg-ssh-open-to-world
+    resource: terraform.aws_security_group
+    description: SSH (port 22) open to 0.0.0.0/0
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: "ingress[?from_port==`22`].cidr_blocks[]"
+        value: "0.0.0.0/0"
+        op: contains
+
+  - name: sg-rdp-open-to-world
+    resource: terraform.aws_security_group
+    description: RDP (port 3389) open to 0.0.0.0/0
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: "ingress[?from_port==`3389`].cidr_blocks[]"
+        value: "0.0.0.0/0"
+        op: contains
+
+  # ── EC2 ──────────────────────────────────────────────────────────
+  - name: ec2-imdsv1-allowed
+    resource: terraform.aws_instance
+    description: Instance metadata service v1 is not disabled
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: "metadata_options.http_tokens"
+        value: required
+        op: ne
+
+  - name: ec2-ebs-not-encrypted
+    resource: terraform.aws_instance
+    description: Root EBS volume is not encrypted
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: "root_block_device.encrypted"
+        value: false
+
+  - name: ec2-detailed-monitoring-disabled
+    resource: terraform.aws_instance
+    description: Detailed monitoring is disabled
+    metadata:
+      severity: medium
+    filters:
+      - type: value
+        key: monitoring
+        value: false
+
+  # ── S3 ───────────────────────────────────────────────────────────
+  # NOTE: c7n-left cannot check cross-resource relationships, so we
+  # cannot verify "bucket has no aws_s3_bucket_logging" or "bucket has
+  # no aws_s3_bucket_public_access_block". Those are detected by
+  # Checkov/KICS/Trivy via graph-aware analysis.
+
+  - name: s3-public-acl
+    resource: terraform.aws_s3_bucket_acl
+    description: S3 bucket ACL allows public access
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: acl
+        value:
+          - public-read
+          - public-read-write
+          - authenticated-read
+        op: in
+
+  - name: s3-versioning-disabled
+    resource: terraform.aws_s3_bucket_versioning
+    description: Versioning is explicitly disabled
+    metadata:
+      severity: medium
+    filters:
+      - type: value
+        key: "versioning_configuration.status"
+        value: Disabled
+
+  # ── IAM ──────────────────────────────────────────────────────────
+  - name: iam-wildcard-actions
+    resource: terraform.aws_iam_role_policy
+    description: IAM policy allows Action * on Resource *
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: "policy"
+        value: '"Action":"*"'
+        op: contains
+
+  # ── RDS ──────────────────────────────────────────────────────────
+  - name: rds-not-encrypted
+    resource: terraform.aws_db_instance
+    description: RDS instance storage is not encrypted
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: storage_encrypted
+        value: false
+
+  - name: rds-publicly-accessible
+    resource: terraform.aws_db_instance
+    description: RDS instance is publicly accessible
+    metadata:
+      severity: critical
+    filters:
+      - type: value
+        key: publicly_accessible
+        value: true
+
+  - name: rds-no-backups
+    resource: terraform.aws_db_instance
+    description: RDS backup retention period is 0
+    metadata:
+      severity: high
+    filters:
+      - type: value
+        key: backup_retention_period
+        value: 0
+
+  - name: rds-no-deletion-protection
+    resource: terraform.aws_db_instance
+    description: RDS deletion protection is disabled
+    metadata:
+      severity: medium
+    filters:
+      - type: value
+        key: deletion_protection
+        value: false

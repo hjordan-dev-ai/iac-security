@@ -1,6 +1,6 @@
 name: bakeoff
 
-# Single workflow that runs all five scanners as parallel matrix jobs and
+# Single workflow that runs all six scanners as parallel matrix jobs and
 # aggregates the results in one final job. Collapsing into one workflow lets
 # the aggregator use a same-run actions/download-artifact (no fragile
 # cross-workflow plumbing).
@@ -331,13 +331,83 @@ jobs:
           retention-days: 14
 
   # ───────────────────────────────────────────────────────────────────────
+  # c7n-left — the incumbent. Runs Cloud Custodian policies from the
+  # policies/ directory against the same stacks. c7n-left has NO built-in
+  # rules; the starter policy set written for this bake-off covers the
+  # planted-issue categories (encryption, public exposure, IAM, etc.) so
+  # the recall metric reflects the POLICY SET, not the tool itself.
+  # ───────────────────────────────────────────────────────────────────────
+  c7n-left:
+    name: c7n-left / ${{ matrix.cloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install c7n-left
+        run: pip install c7n c7n-left
+
+      - name: Run c7n-left
+        continue-on-error: true
+        run: |
+          mkdir -p reports c7n-out
+          c7n-left run \
+            --policy-dir policies \
+            --directory terraform/${{ matrix.cloud }} \
+            --output json \
+            --output-file c7n-out/c7n.json \
+            --filters "resource=terraform.*" || true
+          cp c7n-out/c7n.json reports/raw-c7n-left-${{ matrix.cloud }}.json 2>/dev/null || true
+
+      - name: Convert c7n-left JSON → GitLab SAST
+        if: always()
+        run: |
+          if [ -f c7n-out/c7n.json ] && [ -s c7n-out/c7n.json ]; then
+            python tools/normalize/c7n_to_gitlab_sast.py \
+              c7n-out/c7n.json \
+              reports/gl-sast-report-c7n-left-${{ matrix.cloud }}.json
+          else
+            echo "c7n-left produced no output; emitting empty stub"
+            python3 -c "
+          import json
+          stub = {
+            'version': '15.0.7',
+            'scan': {
+              'scanner': {'id': 'c7n-left', 'name': 'c7n-left', 'version': 'unknown',
+                          'vendor': {'name': 'Cloud Custodian'}},
+              'analyzer': {'id': 'c7n-left', 'name': 'c7n-left', 'version': 'unknown',
+                           'vendor': {'name': 'Cloud Custodian'}},
+              'type': 'sast', 'status': 'failure',
+              'start_time': '1970-01-01T00:00:00', 'end_time': '1970-01-01T00:00:00',
+            },
+            'vulnerabilities': [],
+          }
+          with open('reports/gl-sast-report-c7n-left-${{ matrix.cloud }}.json', 'w') as f:
+              json.dump(stub, f)
+          "
+          fi
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gl-sast-c7n-left-${{ matrix.cloud }}
+          path: reports/
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────
   # Aggregate — runs after every scanner completes. Uses needs: to wait
-  # for all matrix jobs of all five scanners.
+  # for all six scanners.
   # ───────────────────────────────────────────────────────────────────────
   aggregate:
     name: Aggregate bake-off results
     runs-on: ubuntu-latest
-    needs: [checkov, kics, trivy, snyk, semgrep]
+    needs: [checkov, kics, trivy, snyk, semgrep, c7n-left]
     if: always()
     steps:
       - uses: actions/checkout@v5

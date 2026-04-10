@@ -18,15 +18,16 @@ This repo gives the Director of CICD four answers:
 3. Which tool handles `tfvars` / partial config gracefully (the c7n-left pain point)?
 4. Which tool's JSON is easiest to render in our internal UI?
 
-## The five scanners
+## The six scanners
 
 | Tool | License | GitLab SAST | Notes |
 |---|---|---|---|
 | **Checkov** (Bridgecrew) | Apache 2.0 | Native (`-o gitlab_sast`) | Largest community, Python custom rules |
-| **KICS** (Checkmarx) | Apache 2.0 | Native (`--report-formats gitlab-sast`) | 2,400+ Rego rules |
+| **KICS** (Checkmarx) | Apache 2.0 | Native (`--report-formats glsast`) | 2,400+ Rego rules |
 | **Trivy** (Aqua) | Apache 2.0 | SARIF → converted | Direct comparison vs. broken bundled version |
 | **Snyk IaC** | Freemium | SARIF → converted | Requires `SNYK_TOKEN` repo secret |
 | **Semgrep IaC** | LGPL 2.1 | Native (`--gitlab-sast`) | Strongest custom-rule story |
+| **c7n-left** (Cloud Custodian) | Apache 2.0 | JSON → converted | The incumbent. No built-in rules — uses custom YAML policies in `policies/` |
 
 > See [`SECURITY.md`](SECURITY.md) for supply-chain pin rationale — Trivy and
 > KICS GitHub Actions were reportedly compromised in March 2026 and we run
@@ -35,10 +36,11 @@ This repo gives the Director of CICD four answers:
 ## Repo layout
 
 ```
-.github/workflows/        bakeoff.yml — 5 parallel scanner jobs + aggregator
+.github/workflows/        bakeoff.yml — 6 parallel scanner jobs + aggregator
 terraform/aws/            Realistic AWS stack with 20 planted issues
 terraform/azure/          Realistic Azure stack with 21 planted issues
-tools/normalize/          SARIF → GitLab SAST converter (stdlib only)
+policies/                 c7n-left YAML policies (starter set for the bake-off)
+tools/normalize/          SARIF/c7n → GitLab SAST converters (stdlib only)
 tools/aggregate/          Merge reports → comparison.json + comparison.html
 tools/ground_truth/       Score per-tool recall against EXPECTED_FINDINGS.md
 ```
@@ -111,6 +113,7 @@ how it handles this:
 | Trivy | _tbd_ | _tbd_ | Converted | Rego | _tbd_ |
 | Snyk IaC | _tbd_ | _tbd_ | Converted | Proprietary | _tbd_ |
 | Semgrep | _tbd_ | _tbd_ | Native | YAML | _tbd_ |
+| c7n-left | _tbd_ | _tbd_ | Converted | YAML (Cloud Custodian DSL) | _tbd_ |
 
 ## Known reporting quirks
 
